@@ -2,6 +2,7 @@ import os
 import time
 from groq import Groq
 import git
+from git import Repo
 
 # Initialize the Groq client with your API key
 client = Groq(
@@ -9,10 +10,10 @@ client = Groq(
 )
 
 # Path to the content directory in your static site repository
-CONTENT_DIR = 'solana-content-farm/articles'
+CONTENT_DIR = 'content-farm-agent/site/content/articles'
 
 # Initialize Git repository
-repo = Repo('path/to/your/site')
+repo = Repo('solana-content-farm')
 
 # Agent 1: Topic Generator Agent
 def topic_generator_agent():
