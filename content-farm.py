@@ -79,13 +79,14 @@ date: "{time.strftime('%Y-%m-%d')}"
 # Agent 5: Deployment Agent
 def deployment_agent(filepaths):
     # Add new files to Git
-    repo.index.add(filepaths)
+    repo.git.add(A=True)
     # Commit changes
     repo.index.commit("Add new articles")
     # Push to remote repository
     origin = repo.remote(name='origin')
     origin.push()
     print("Changes have been pushed to the repository.")
+
 
 # Main orchestration function
 def main():
