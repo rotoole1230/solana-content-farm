@@ -155,9 +155,20 @@ def marketing_agent(budget, analytics_data):
 # Helper function to load existing articles metadata
 def load_existing_articles():
     if os.path.exists(INDEX_FILE):
-        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
-            existing_articles = json.load(f)
+        try:
+            with open(INDEX_FILE, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content:
+                    existing_articles = json.loads(content)
+                else:
+                    print(f"Warning: {INDEX_FILE} is empty. Initializing with an empty dictionary.")
+                    existing_articles = {}
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from {INDEX_FILE}: {e}")
+            print("Initializing with an empty dictionary.")
+            existing_articles = {}
     else:
+        print(f"{INDEX_FILE} does not exist. Initializing with an empty dictionary.")
         existing_articles = {}
     return existing_articles
 
@@ -165,7 +176,8 @@ def load_existing_articles():
 def update_existing_articles(existing_articles, title, article_content):
     existing_articles[title] = article_content
     with open(INDEX_FILE, 'w', encoding='utf-8') as f:
-        json.dump(existing_articles, f)
+        json.dump(existing_articles, f, ensure_ascii=False, indent=2)
+    print(f"Updated {INDEX_FILE} with new article: {title}")
 
 # Helper function to analyze existing articles and find underrepresented topics
 def analyze_existing_topics(existing_articles):
@@ -188,6 +200,9 @@ def main():
     while True:
         try:
             existing_articles = load_existing_articles()
+            if not isinstance(existing_articles, dict):
+                print(f"Error: existing_articles is not a dictionary. Resetting to empty dictionary.")
+                existing_articles = {}
             existing_titles = list(existing_articles.keys())
             
             underrepresented_topics = analyze_existing_topics(existing_articles)
