@@ -234,10 +234,13 @@ def main():
                 except Exception as e:
                     print(f"Error processing topic '{topic}': {e}")
                 
-                time.sleep(2)
+                time.sleep(2)  # Short delay between processing each topic
             
             if filepaths:
                 deployment_agent(filepaths)
+                print(f"Deployed {len(filepaths)} new articles.")
+            else:
+                print("No new articles to deploy.")
             
             print("Sleeping for 10 minutes before generating new topics...")
             time.sleep(600)
