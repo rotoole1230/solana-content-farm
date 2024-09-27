@@ -120,17 +120,34 @@ def content_moderation_agent(title, article_content, existing_articles):
 
 # Agent 6: Deployment Agent
 def deployment_agent(filepaths):
-    # Add new files to Git
-    repo.git.add(A=True)
-    # Commit changes
-    repo.index.commit("Add new articles")
-    # Push to remote repository
     try:
-        origin = repo.remote(name='origin')
-        origin.push()
-        print("Changes have been pushed to the repository.")
+        # Add new files to Git
+        repo.git.add(A=True)
+        
+        # Check if there are changes to commit
+        if repo.is_dirty(untracked_files=True):
+            # Commit changes
+            commit_message = f"Add new articles: {', '.join(os.path.basename(fp) for fp in filepaths)}"
+            repo.index.commit(commit_message)
+            
+            # Push to remote repository
+            origin = repo.remote(name='origin')
+            push_info = origin.push()
+            
+            if push_info:
+                for info in push_info:
+                    if info.flags & info.ERROR:
+                        print(f"Error pushing to repository: {info.summary}")
+                    else:
+                        print(f"Successfully pushed to {info.remote_ref_string}")
+            else:
+                print("No changes to push.")
+        else:
+            print("No changes to commit.")
     except git.exc.GitCommandError as e:
-        print(f"Error pushing to repository: {e}")
+        print(f"Git command error: {e}")
+    except Exception as e:
+        print(f"Unexpected error during deployment: {e}")
 
 # Agent 7: Marketing and Advertising Agent (Inactive Initially)
 def marketing_agent(budget, analytics_data):
@@ -234,11 +251,10 @@ def main():
                 except Exception as e:
                     print(f"Error processing topic '{topic}': {e}")
                 
-                time.sleep(2)  # Short delay between processing each topic
+                time.sleep(2)
             
             if filepaths:
                 deployment_agent(filepaths)
-                print(f"Deployed {len(filepaths)} new articles.")
             else:
                 print("No new articles to deploy.")
             
