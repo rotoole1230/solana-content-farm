@@ -6,14 +6,17 @@ import json
 from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from dotenv import load_dotenv
 
 # Initialize the Groq client with your API key
+load_dotenv()  # This loads the variables from .env
+
 client = Groq(
-    api_key=('GROQ_API_KEY'),
+    api_key=os.getenv('GROQ_API_KEY'),
 )
 
 # Paths to directories and files
-CONTENT_DIR = 'content-farm-agent/site/content/articles'
+CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'site', 'content', 'articles')
 INDEX_FILE = 'articles_index.json'
 ANALYTICS_FILE = 'site_analytics.json'  # Placeholder for analytics data
 
@@ -26,7 +29,8 @@ def topic_generator_agent(existing_topics, underrepresented_topics):
         "Generate a list of 10 unique, in-depth article topics that explore detailed and technical aspects of the Solana blockchain. "
         f"Avoid topics that have already been covered: {existing_topics}. "
         f"Focus on these underrepresented areas: {underrepresented_topics}. "
-        "Suggest areas that can be expounded upon differently."
+        "Suggest areas that can be expounded upon differently. "
+        "Return each topic on a new line, without numbering."
     )
     response = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
@@ -34,7 +38,7 @@ def topic_generator_agent(existing_topics, underrepresented_topics):
     )
     topics = response.choices[0].message.content
     # Process topics into a list
-    topics_list = [topic.strip("- ").strip() for topic in topics.split('\n') if topic.strip()]
+    topics_list = [topic.strip() for topic in topics.split('\n') if topic.strip()]
     return topics_list
 
 # Agent 2: Writer Agent
@@ -65,15 +69,18 @@ def seo_agent(article):
 # Agent 4: Front-End Agent
 def front_end_agent(article_content, title):
     # Generate a filename based on the title
-    filename = title.lower().replace(' ', '-').replace('/', '-').replace(':', '').replace('"', '') + '.md'
+    filename = title.lower().replace(' ', '-').replace('/', '-').replace(':', '').replace('"', '')[:50] + '.md'
     filepath = os.path.join(CONTENT_DIR, filename)
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
     
     # Create front matter for the Markdown file
     front_matter = f"""---
 title: "{title}"
 date: "{time.strftime('%Y-%m-%d')}"
 ---
-    
+
 """
     # Combine front matter and article content
     full_content = front_matter + article_content
@@ -188,6 +195,9 @@ def main():
         topics = topic_generator_agent(existing_titles, underrepresented_topics)
         filepaths = []
         for topic in topics:
+            if len(topic) > 100:  # Skip overly long topics
+                print(f"Skipping overly long topic: {topic[:100]}...")
+                continue
             print(f"Processing topic: {topic}\n")
             article = writer_agent(topic)
             optimized_article = seo_agent(article)
