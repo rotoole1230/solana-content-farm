@@ -17,11 +17,11 @@ client = Groq(
 
 # Paths to directories and files
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'site', 'content', 'articles')
-INDEX_FILE = 'articles_index.json'
-ANALYTICS_FILE = 'site_analytics.json'  # Placeholder for analytics data
+INDEX_FILE = os.path.join(CONTENT_DIR, 'articles_index.json')
+ANALYTICS_FILE = os.path.join(os.path.dirname(__file__), 'site_analytics.json')
 
 # Initialize Git repository
-repo = git.Repo('solana-content-farm')
+repo = git.Repo(os.path.dirname(os.path.abspath(__file__)))
 
 # Agent 1: Topic Generator Agent
 def topic_generator_agent(existing_topics, underrepresented_topics):
@@ -125,9 +125,12 @@ def deployment_agent(filepaths):
     # Commit changes
     repo.index.commit("Add new articles")
     # Push to remote repository
-    origin = repo.remote(name='origin')
-    origin.push()
-    print("Changes have been pushed to the repository.")
+    try:
+        origin = repo.remote(name='origin')
+        origin.push()
+        print("Changes have been pushed to the repository.")
+    except git.exc.GitCommandError as e:
+        print(f"Error pushing to repository: {e}")
 
 # Agent 7: Marketing and Advertising Agent (Inactive Initially)
 def marketing_agent(budget, analytics_data):
@@ -182,54 +185,50 @@ def analyze_existing_topics(existing_articles):
 
 # Main orchestration function
 def main():
-    # Endless loop to create an endless funnel of content
     while True:
-        # Load existing articles
-        existing_articles = load_existing_articles()
-        existing_titles = list(existing_articles.keys())
-        
-        # Content Moderation Agent analyzes existing topics
-        underrepresented_topics = analyze_existing_topics(existing_articles)
-        
-        # Generate new topics with guidance from Content Moderation Agent
-        topics = topic_generator_agent(existing_titles, underrepresented_topics)
-        filepaths = []
-        for topic in topics:
-            if len(topic) > 100:  # Skip overly long topics
-                print(f"Skipping overly long topic: {topic[:100]}...")
-                continue
-            print(f"Processing topic: {topic}\n")
-            article = writer_agent(topic)
-            optimized_article = seo_agent(article)
+        try:
+            existing_articles = load_existing_articles()
+            existing_titles = list(existing_articles.keys())
             
-            # Content Moderation Agent checks for duplication
-            if content_moderation_agent(topic, optimized_article, existing_articles):
-                filepath = front_end_agent(optimized_article, title=topic)
-                filepaths.append(filepath)
-                # Update existing articles metadata
-                update_existing_articles(existing_articles, topic, optimized_article)
-            else:
-                print(f"Article '{topic}' was skipped due to duplication.")
+            underrepresented_topics = analyze_existing_topics(existing_articles)
             
-            # Optional: Add a delay between processing each topic
-            time.sleep(2)
-        
-        if filepaths:
-            # Deploy the new articles
-            deployment_agent(filepaths)
+            print(f"Generating new topics based on {len(existing_titles)} existing articles and {len(underrepresented_topics)} underrepresented topics.")
+            topics = topic_generator_agent(existing_titles, underrepresented_topics)
             
-            # Load site analytics data (Placeholder)
-            if os.path.exists(ANALYTICS_FILE):
-                with open(ANALYTICS_FILE, 'r', encoding='utf-8') as f:
-                    analytics_data = json.load(f)
-            else:
-                analytics_data = {}
+            filepaths = []
+            for topic in topics:
+                try:
+                    if len(topic) > 100:
+                        print(f"Skipping overly long topic: {topic[:100]}...")
+                        continue
+                    print(f"Processing topic: {topic}")
+                    
+                    article = writer_agent(topic)
+                    print(f"Article generated for topic: {topic}")
+                    
+                    optimized_article = seo_agent(article)
+                    print(f"Article optimized for SEO: {topic}")
+                    
+                    if content_moderation_agent(topic, optimized_article, existing_articles):
+                        filepath = front_end_agent(optimized_article, title=topic)
+                        filepaths.append(filepath)
+                        update_existing_articles(existing_articles, topic, optimized_article)
+                        print(f"Article '{topic}' added to index and saved to {filepath}")
+                    else:
+                        print(f"Article '{topic}' was skipped due to duplication.")
+                except Exception as e:
+                    print(f"Error processing topic '{topic}': {e}")
+                
+                time.sleep(2)
             
-            # Marketing Agent (Currently Inactive)
-            # marketing_agent(budget=1000, analytics_data=analytics_data)
-        
-        # Optional: Sleep before generating new topics
-        time.sleep(600)  # Sleep for 10 minutes before generating new topics
+            if filepaths:
+                deployment_agent(filepaths)
+            
+            print("Sleeping for 10 minutes before generating new topics...")
+            time.sleep(600)
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            time.sleep(60)
 
 # Run the main function
 if __name__ == "__main__":
