@@ -121,6 +121,18 @@ def content_moderation_agent(title, article_content, existing_articles):
 # Agent 6: Deployment Agent
 def deployment_agent(filepaths):
     try:
+        origin = repo.remote(name='origin')
+
+        # Fetch changes from the remote repository
+        print("Fetching changes from the remote repository...")
+        origin.fetch()
+        print("Successfully fetched changes.")
+
+        # Merge remote changes into local repository
+        print("Merging remote changes into local repository...")
+        repo.git.merge(f'origin/{repo.active_branch.name}')
+        print("Successfully merged remote changes.")
+
         # Add new files to Git
         repo.git.add(A=True)
         
@@ -129,23 +141,39 @@ def deployment_agent(filepaths):
             # Commit changes
             commit_message = f"Add new articles: {', '.join(os.path.basename(fp) for fp in filepaths)}"
             repo.index.commit(commit_message)
+            print(f"Committed changes with message: '{commit_message}'")
             
             # Push to remote repository
-            origin = repo.remote(name='origin')
+            print("Pushing changes to the remote repository...")
             push_info = origin.push()
             
+            # Check push results
             if push_info:
                 for info in push_info:
                     if info.flags & info.ERROR:
                         print(f"Error pushing to repository: {info.summary}")
                     else:
-                        print(f"Successfully pushed to {info.remote_ref_string}")
+                        print(f"Successfully pushed to {info.remote_ref.name}")
             else:
-                print("No changes to push.")
+                print("Push completed with no information.")
         else:
             print("No changes to commit.")
     except git.exc.GitCommandError as e:
         print(f"Git command error: {e}")
+        if 'non-fast-forward' in e.stderr:
+            print("Non-fast-forward error detected. The local repository is behind the remote repository.")
+            print("Attempting to pull and merge remote changes...")
+            try:
+                repo.git.pull()
+                print("Successfully pulled and merged remote changes.")
+                print("Retrying to push changes...")
+                repo.git.push()
+                print("Successfully pushed changes after pulling.")
+            except Exception as pull_error:
+                print(f"Failed to pull and push changes: {pull_error}")
+                print("Manual intervention required to resolve merge conflicts.")
+        else:
+            print("An unexpected Git error occurred.")
     except Exception as e:
         print(f"Unexpected error during deployment: {e}")
 
