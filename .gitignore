@@ -1,5 +1,0 @@
-echo "venv/" >> .gitignore
-echo "__pycache__/" >> .gitignore
-echo ".DS_Store" >> .gitignore
-echo "site/public/" >> .gitignore  # Hugo's output directory
-echo ".env" >> .gitignore
