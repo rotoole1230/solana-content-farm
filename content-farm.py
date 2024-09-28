@@ -10,10 +10,16 @@ from dotenv import load_dotenv
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import openai
+import requests
+from datetime import datetime
+from slugify import slugify
+import httpx
+import threading
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed from logging.INFO to logging.DEBUG
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
@@ -29,18 +35,38 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 if not GROQ_API_KEY:
     logging.error("GROQ_API_KEY is not set in environment variables.")
     sys.exit(1)
+else:
+    logging.debug("GROQ_API_KEY is set.")
 
 client = Groq(api_key=GROQ_API_KEY)
+
+# Load OpenAI API key
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    logging.error("OPENAI_API_KEY is not set in environment variables.")
+    sys.exit(1)
+else:
+    logging.debug("OPENAI_API_KEY is set.")
+
+openai.api_key = OPENAI_API_KEY
 
 # Configurable parameters
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'site', 'content', 'articles')
 INDEX_FILE = os.path.join(CONTENT_DIR, 'articles_index.json')
 ANALYTICS_FILE = os.path.join(os.path.dirname(__file__), 'site_analytics.json')
-MAX_TOPIC_LENGTH = 100
+MAX_TOPIC_LENGTH = 120
 SIMILARITY_THRESHOLD = 0.7
 TOP_N_TERMS = 50  # Number of top terms to consider as covered
-SLEEP_TIME_BETWEEN_TOPICS = 2  # seconds
-SLEEP_TIME_BETWEEN_ITERATIONS = 600  # seconds
+SLEEP_TIME_BETWEEN_TOPICS = 10   # Increase delay between topics to 10 seconds
+SLEEP_TIME_BETWEEN_ITERATIONS = 900  # Increase delay between iterations to 15 minutes
+GENERATE_VISUALIZATIONS = False  # Set to True to enable visualizations
+
+# Ensure content directory exists
+if not os.path.exists(CONTENT_DIR):
+    os.makedirs(CONTENT_DIR)
+    logging.info("Created content directory at %s", CONTENT_DIR)
+else:
+    logging.debug("Content directory exists: %s", CONTENT_DIR)
 
 # Initialize Git repository
 try:
@@ -65,7 +91,27 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-def topic_generator_agent(existing_topics, underrepresented_topics):
+# Rate limiting variables
+api_lock = threading.Lock()
+MIN_API_CALL_INTERVAL = 1.0  # Minimum interval in seconds between API calls
+
+def rate_limited(func):
+    def wrapper(*args, **kwargs):
+        with api_lock:
+            now = time.time()
+            since_last_call = now - wrapper.last_call
+            if since_last_call < MIN_API_CALL_INTERVAL:
+                sleep_time = MIN_API_CALL_INTERVAL - since_last_call
+                logging.debug("Rate limiting API call. Sleeping for %.2f seconds.", sleep_time)
+                time.sleep(sleep_time)
+            result = func(*args, **kwargs)
+            wrapper.last_call = time.time()
+            return result
+    wrapper.last_call = 0.0
+    return wrapper
+
+@rate_limited
+def topic_generation_agent(existing_topics, underrepresented_topics):
     """
     Generates a list of unique, in-depth article topics.
     """
@@ -76,6 +122,7 @@ def topic_generator_agent(existing_topics, underrepresented_topics):
 
     prompt = (
         "Generate a list of 10 unique, in-depth article topics that explore detailed and technical aspects of the Solana blockchain.\n"
+        "Each topic should be concise and no longer than 100 characters.\n"
         f"Avoid topics that have already been covered: {existing_topics_sample}.\n"
         f"Focus on these underrepresented areas: {underrepresented_topics_sample}.\n"
         "Suggest areas that can be expounded upon differently.\n"
@@ -93,70 +140,100 @@ def topic_generator_agent(existing_topics, underrepresented_topics):
         logging.error("Error generating topics: %s", e)
         return []
 
+@rate_limited
 def writer_agent(topic):
     """
     Writes a detailed and technical article on the given topic.
     """
     logging.info("Writing article for topic: '%s'", topic)
     prompt = (
-        f"Write a detailed and technical article about the following topic:\n{topic}\n"
-        "The article should be comprehensive, well-structured, and informative."
+        f"Write a detailed and technical article about '{topic}' suitable for blockchain developers and enthusiasts."
     )
     try:
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.2-90b-text-preview",
         )
-        article = response.choices[0].message.content
-        return article
+        logging.debug("Writer agent response: %s", response)
+        article = response.choices[0].message.content.strip()
+        if not article:
+            logging.warning("Empty article received from writer agent for topic '%s'.", topic)
+            return None
+        else:
+            logging.debug("Writer agent produced article: %s", article)
+            return article
     except Exception as e:
-        logging.error("Error writing article for topic '%s': %s", topic, e)
+        logging.error("Error generating article for topic '%s': %s", topic, e, exc_info=True)
         return None
 
+@rate_limited
 def seo_agent(article):
     """
-    Optimizes the article for SEO.
+    Optimizes the article for SEO by adding metadata, keywords, header tags, and internal links.
     """
     logging.info("Optimizing article for SEO.")
     prompt = (
-        f"Optimize the following article for SEO. Include relevant keywords, meta descriptions, and ensure it adheres to best SEO practices:\n\n{article}"
+        "Optimize the following article for SEO by adding metadata, keywords, header tags, and internal links where appropriate.\n\n"
+        "Article:\n" + article
     )
-    try:
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.2-90b-text-preview",
-        )
-        optimized_article = response.choices[0].message.content
-        return optimized_article
-    except Exception as e:
-        logging.error("Error optimizing article for SEO: %s", e)
-        return None
+    max_retries = 3
+    retry_delay = 5  # Start with a 5-second delay
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.2-90b-text-preview",
+            )
+            logging.debug("SEO agent response: %s", response)
+            optimized_article = response.choices[0].message.content.strip()
+            if not optimized_article:
+                logging.warning("Empty optimized article received from SEO agent.")
+                return None
+            else:
+                logging.debug("SEO agent optimized article: %s", optimized_article)
+                return optimized_article
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                retry_after = int(e.response.headers.get('Retry-After', '60'))
+                logging.error("Rate limit error in SEO agent: %s", e)
+                if attempt < max_retries - 1:
+                    logging.info("Retrying SEO optimization in %d seconds...", retry_after)
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    logging.error("Max retries reached in SEO agent. Skipping optimization.")
+                    return None
+            else:
+                logging.error("HTTP error in SEO agent: %s", e)
+                return None
+        except Exception as e:
+            logging.error("Error optimizing article: %s", e, exc_info=True)
+            return None
 
-def front_end_agent(article_content, title):
+def front_end_agent(optimized_article, title):
     """
-    Saves the article content to a Markdown file with appropriate front matter.
+    Formats the article for the front-end, optionally generates visualizations, and saves it to the content directory.
     """
-    logging.info("Saving article '%s' to Markdown file.", title)
-    filename = title.lower().replace(' ', '-').replace('/', '-').replace(':', '').replace('"', '')[:50] + '.md'
+    logging.info("Formatting article for front-end.")
+    filename = f"{slugify(title)}.md"
     filepath = os.path.join(CONTENT_DIR, filename)
-
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-
-    front_matter = f"""---
-title: "{title}"
-date: "{time.strftime('%Y-%m-%d')}"
----
-
-"""
-    full_content = front_matter + article_content
-
+    
+    image_paths = []
+    
+    if GENERATE_VISUALIZATIONS:
+        logging.info("Determining if visualizations are needed for the article.")
+        image_paths = visualization_agent(optimized_article)
+    else:
+        logging.info("Visualization generation is disabled.")
+    
+    # Proceed with saving the article as usual
     try:
-        with open(filepath, 'w', encoding='utf-8') as file:
-            file.write(full_content)
-        logging.info("Article '%s' has been saved to %s", title, filepath)
+        with open(filepath, 'w') as f:
+            f.write(optimized_article)
+        logging.info("Article saved to %s", filepath)
         return filepath
     except Exception as e:
-        logging.error("Error saving article '%s' to file: %s", title, e)
+        logging.error("Error saving article to %s: %s", filepath, e, exc_info=True)
         return None
 
 def content_moderation_agent(title, article_content, existing_articles):
@@ -176,6 +253,7 @@ def content_moderation_agent(title, article_content, existing_articles):
             vectors = vectorizer.toarray()
             cosine_matrix = cosine_similarity(vectors[0:1], vectors[1:])
             max_similarity = cosine_matrix.max()
+            logging.debug("Content similarity for '%s': %.2f", title, max_similarity)
             if max_similarity > SIMILARITY_THRESHOLD:
                 logging.warning(
                     "Content similar to existing articles detected (similarity: %.2f). Skipping article '%s'.",
@@ -183,85 +261,50 @@ def content_moderation_agent(title, article_content, existing_articles):
                 )
                 return False
         except Exception as e:
-            logging.error("Error during content similarity check: %s", e)
-            # Decide whether to skip the article or not; here we proceed cautiously
-            return False
+            logging.error("Error during content similarity check: %s", e, exc_info=True)
+            # Proceed cautiously if an error occurs
+            return True
+    else:
+        logging.info("No existing articles found. Proceeding with the new article.")
 
     return True
 
 def deployment_agent(filepaths):
     """
-    Deploys new articles by committing and pushing to the Git repository.
+    Handles deployment of the new articles.
     """
-    logging.info("Deploying new articles...")
+    logging.info("Deploying articles...")
     try:
-        # Ensure we have the latest changes from the remote repository
+        # Stage new files
+        repo.index.add(filepaths)
+        logging.debug("Staged files for commit: %s", filepaths)
+
+        # Commit changes
+        commit_message = "Automated content update"
+        commit = repo.index.commit(commit_message)
+        logging.info("Committed changes with message: '%s'", commit_message)
+        logging.debug("Commit details: %s", commit)
+
+        # Push changes
         origin = repo.remote(name='origin')
-        logging.info("Fetching changes from the remote repository...")
-        origin.fetch()
-        logging.info("Successfully fetched changes.")
-
-        logging.info("Merging remote changes into local repository...")
-        repo.git.merge(f'origin/{repo.active_branch.name}')
-        logging.info("Successfully merged remote changes.")
-
-        # Add new files to Git
-        repo.git.add(A=True)
-
-        if repo.is_dirty(untracked_files=True):
-            commit_message = f"Add new articles: {', '.join(os.path.basename(fp) for fp in filepaths)}"
-            repo.index.commit(commit_message)
-            logging.info("Committed changes with message: '%s'", commit_message)
-
-            # Push to remote repository
-            logging.info("Pushing changes to the remote repository...")
-            origin.push()
-            logging.info("Successfully pushed changes.")
-        else:
-            logging.info("No changes to commit.")
-    except git.exc.GitCommandError as e:
-        logging.error("Git command error: %s", e)
-        if 'non-fast-forward' in str(e):
-            logging.warning("Non-fast-forward error detected. The local repository is behind the remote repository.")
-            logging.info("Attempting to pull and merge remote changes...")
-            try:
-                repo.git.pull('--rebase')
-                logging.info("Successfully pulled and merged remote changes.")
-                logging.info("Retrying to push changes...")
-                repo.git.push()
-                logging.info("Successfully pushed changes after pulling.")
-            except Exception as pull_error:
-                logging.error("Failed to pull and push changes: %s", pull_error)
-                logging.error("Manual intervention required to resolve merge conflicts.")
-        else:
-            logging.error("An unexpected Git error occurred: %s", e)
+        push_info = origin.push()
+        for info in push_info:
+            if info.flags & info.ERROR:
+                logging.error("Push error: %s", info.summary)
+            else:
+                logging.info("Push success: %s", info.summary)
+        logging.info("Pushed changes to remote repository.")
     except Exception as e:
-        logging.error("Unexpected error during deployment: %s", e)
+        logging.error("Error during deployment: %s", e, exc_info=True)
 
 def load_existing_articles():
     """
-    Loads existing articles metadata from the index file.
+    Loads existing articles from the index file.
     """
     if os.path.exists(INDEX_FILE):
-        try:
-            with open(INDEX_FILE, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                if content:
-                    existing_articles = json.loads(content)
-                else:
-                    logging.warning("Index file '%s' is empty. Initializing with an empty dictionary.", INDEX_FILE)
-                    existing_articles = {}
-        except json.JSONDecodeError as e:
-            logging.error("Error decoding JSON from '%s': %s", INDEX_FILE, e)
-            logging.info("Initializing with an empty dictionary.")
-            existing_articles = {}
-        except Exception as e:
-            logging.error("Error reading index file '%s': %s", INDEX_FILE, e)
-            existing_articles = {}
-    else:
-        logging.info("Index file '%s' does not exist. Initializing with an empty dictionary.", INDEX_FILE)
-        existing_articles = {}
-    return existing_articles
+        with open(INDEX_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
 def update_existing_articles(existing_articles, title, article_content):
     """
@@ -295,29 +338,31 @@ def analyze_existing_topics(existing_articles):
         logging.error("Error analyzing existing topics: %s", e)
         return []
 
+def visualization_agent(article_content):
+    """
+    Visualization generation is temporarily disabled.
+    """
+    logging.info("Visualization generation is currently disabled.")
+    return []
+
 def main():
     """
     Main function that orchestrates the agents to generate and deploy articles.
     """
     logging.info("Starting the content generation loop.")
+    existing_articles = load_existing_articles()
+    existing_topics = list(existing_articles.keys())
+    logging.debug("Loaded existing topics: %s", existing_topics)
+
+    underrepresented_topics = ["Solana's BPF VM", "Solana's Transaction Processing", "Solana's Tokenomics"]
+    logging.debug("Underrepresented topics: %s", underrepresented_topics)
+
     while not shutdown_flag:
         try:
-            existing_articles = load_existing_articles()
-            if not isinstance(existing_articles, dict):
-                logging.error("Existing articles data is not a dictionary. Resetting to empty dictionary.")
-                existing_articles = {}
-            existing_titles = list(existing_articles.keys())
-
-            underrepresented_topics = analyze_existing_topics(existing_articles)
-
-            logging.info(
-                "Generating new topics based on %d existing articles and %d underrepresented topics.",
-                len(existing_titles), len(underrepresented_topics)
-            )
-            topics = topic_generator_agent(existing_titles, underrepresented_topics)
-
+            topics = topic_generation_agent(existing_topics, underrepresented_topics)
+            logging.debug("Generated topics: %s", topics)
             if not topics:
-                logging.warning("No new topics generated. Sleeping before retrying.")
+                logging.warning("No topics generated. Sleeping before next iteration.")
                 time.sleep(SLEEP_TIME_BETWEEN_ITERATIONS)
                 continue
 
@@ -326,18 +371,22 @@ def main():
                 if shutdown_flag:
                     logging.info("Shutdown flag detected. Exiting topic processing loop.")
                     break
+
+                if len(topic) > MAX_TOPIC_LENGTH:
+                    logging.warning("Skipping topic exceeding length limit (%d characters): %s", len(topic), topic)
+                    continue  # Skip this topic and proceed to the next one
+
                 try:
-                    if len(topic) > MAX_TOPIC_LENGTH:
-                        logging.warning("Skipping overly long topic: %s...", topic[:MAX_TOPIC_LENGTH])
-                        continue
                     logging.info("Processing topic: '%s'", topic)
 
                     article = writer_agent(topic)
                     if not article:
+                        logging.warning("No article generated for topic '%s'. Skipping.", topic)
                         continue
 
                     optimized_article = seo_agent(article)
                     if not optimized_article:
+                        logging.warning("SEO optimization failed for article on topic '%s'. Skipping.", topic)
                         continue
 
                     if content_moderation_agent(topic, optimized_article, existing_articles):
@@ -345,11 +394,14 @@ def main():
                         if filepath:
                             filepaths.append(filepath)
                             update_existing_articles(existing_articles, topic, optimized_article)
+                            existing_topics.append(topic)  # Update existing topics
                             logging.info("Article '%s' added to index and saved to '%s'", topic, filepath)
+                        else:
+                            logging.warning("Failed to save article '%s'.", topic)
                     else:
-                        logging.info("Article '%s' was skipped due to duplication.", topic)
+                        logging.info("Article '%s' was skipped due to duplication or similarity.", topic)
                 except Exception as e:
-                    logging.error("Error processing topic '%s': %s", topic, e)
+                    logging.error("Error processing topic '%s': %s", topic, e, exc_info=True)
                     continue  # Proceed to the next topic
 
                 time.sleep(SLEEP_TIME_BETWEEN_TOPICS)
@@ -359,6 +411,7 @@ def main():
             else:
                 logging.info("No new articles to deploy.")
 
+            # Sleep at the end of the main loop
             logging.info("Sleeping for %d seconds before generating new topics...", SLEEP_TIME_BETWEEN_ITERATIONS)
             time.sleep(SLEEP_TIME_BETWEEN_ITERATIONS)
         except Exception as e:
@@ -370,7 +423,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
